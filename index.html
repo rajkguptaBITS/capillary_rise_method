@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="theme-color" content="#163A5F">
 <title>BITS Pilani | Capillary Rise Measurement</title>
 <style>
@@ -13,11 +13,17 @@ header{background:var(--bits);color:#fff;padding:18px 16px 16px;border-bottom:4p
 main{max-width:900px;margin:auto;padding:14px}.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px #00000012}
 h2{font-size:17px;margin:0 0 10px;color:var(--bits)}p{line-height:1.45}
 button{background:var(--bits);color:#fff;border:0;border-radius:8px;padding:11px 15px;margin:5px 4px 5px 0;font-size:15px;font-weight:600}
+button.secondary{background:#667085}button.zoom{min-width:48px;padding:10px 13px;font-size:18px}
 input{padding:9px;width:110px;font-size:16px;border:1px solid #bbb;border-radius:6px}
-canvas{display:block;width:100%;max-height:65vh;border:1px solid #b8bec5;border-radius:7px;background:#fff;touch-action:none}
+.viewer{position:relative;width:100%;overflow:hidden;border:1px solid #b8bec5;border-radius:7px;background:#111;touch-action:none}
+canvas{display:block;width:100%;height:auto;touch-action:none}
+.zoombar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding:7px 0 2px}
+.zoomlevel{font-size:13px;color:var(--muted);margin-left:4px;min-width:55px}
+.help{font-size:12px;color:var(--muted);margin-top:4px}
 .small{font-size:13px;color:var(--muted)}
 .note{background:#f7f9fb;border-left:4px solid var(--gold);padding:10px;border-radius:6px}
 .footer{text-align:center;color:#667085;font-size:12px;padding:10px 0 20px}
+.status{font-weight:600;color:var(--bits)}
 </style></head>
 <body>
 <header>
@@ -35,12 +41,22 @@ canvas{display:block;width:100%;max-height:65vh;border:1px solid #b8bec5;border-
 <h2>Step 1 — Capture / Upload Photograph</h2>
 <input id="file" type="file" accept="image/*" capture="environment">
 <p class="small">Include the capillary and a millimetre scale in the same plane. Keep the camera approximately perpendicular to the scale.</p>
+
+<div class="viewer" id="viewer">
 <canvas id="canvas"></canvas>
+</div>
+<div class="zoombar">
+<button class="zoom" onclick="changeZoom(1.25)">＋</button>
+<button class="zoom" onclick="changeZoom(0.8)">−</button>
+<button class="secondary" onclick="resetView()">Reset View</button>
+<span class="zoomlevel" id="zoomLevel">1.0×</span>
+</div>
+<div class="help">During calibration or height measurement: zoom in for precision. Drag the image to reposition it, then tap the required reference point.</div>
 </div>
 
 <div class="card">
 <h2>Step 2 — Calibrate the Image</h2>
-<p>Tap the two ends of a known distance on the scale.</p>
+<p>Zoom in if necessary, then tap the two ends of a known distance on the scale.</p>
 <div>Known scale length:
 <input id="known" type="number" value="10" step="0.1"> mm</div>
 <button onclick="startMode('scale')">Select Scale Points</button>
@@ -49,7 +65,7 @@ canvas{display:block;width:100%;max-height:65vh;border:1px solid #b8bec5;border-
 
 <div class="card">
 <h2>Step 3 — Measure Capillary Rise</h2>
-<p>Tap the <b>bulk liquid level</b> first, then the <b>lowest point of the meniscus</b>.</p>
+<p>Zoom in if necessary. Tap the <b>bulk liquid level</b> first, then the <b>lowest point of the meniscus</b>.</p>
 <button onclick="startMode('rise')">Select Points for h</button>
 <p id="hOut">Capillary rise h: —</p>
 </div>
@@ -67,53 +83,132 @@ Mobile Image-Based Measurement Tool · Developed by Prof. Raj Kumar Gupta
 <script>
 const file=document.getElementById('file'),canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
 let img=new Image(),mode='',pts=[],scalePx=0;
+let baseW=0,baseH=0,zoom=1,panX=0,panY=0;
+let dragging=false, moved=false,startX=0,startY=0,lastX=0,lastY=0;
+
+function fitImage(){
+  const maxW=1600;
+  const k=Math.min(1,maxW/img.naturalWidth);
+  baseW=img.naturalWidth*k; baseH=img.naturalHeight*k;
+  canvas.width=Math.round(baseW); canvas.height=Math.round(baseH);
+  resetView();
+}
 
 file.onchange=e=>{
  const f=e.target.files[0]; if(!f)return;
  const reader=new FileReader();
  reader.onload=ev=>{
-  img.onload=()=>{
-   const k=Math.min(1,1800/img.naturalWidth);
-   canvas.width=img.naturalWidth*k; canvas.height=img.naturalHeight*k;
-   ctx.drawImage(img,0,0,canvas.width,canvas.height);
-  };
+  img.onload=()=>{ fitImage(); };
   img.src=ev.target.result;
  };
  reader.readAsDataURL(f);
 };
 
+function resetView(){
+ if(!baseW)return;
+ zoom=1; panX=0; panY=0; updateZoomLabel(); redraw();
+}
+
+function changeZoom(factor){
+ if(!img.src)return;
+ const oldZoom=zoom;
+ zoom=Math.max(1,Math.min(5,zoom*factor));
+ // Keep the centre of the visible canvas approximately fixed while zooming.
+ const cx=canvas.width/2,cy=canvas.height/2;
+ const ratio=zoom/oldZoom;
+ panX=cx-(cx-panX)*ratio;
+ panY=cy-(cy-panY)*ratio;
+ clampPan(); updateZoomLabel(); redraw();
+}
+
+function updateZoomLabel(){document.getElementById('zoomLevel').textContent=zoom.toFixed(1)+'×';}
+
+function clampPan(){
+ const dw=baseW*zoom,dh=baseH*zoom;
+ if(dw<=canvas.width) panX=(canvas.width-dw)/2;
+ else panX=Math.min(0,Math.max(canvas.width-dw,panX));
+ if(dh<=canvas.height) panY=(canvas.height-dh)/2;
+ else panY=Math.min(0,Math.max(canvas.height-dh,panY));
+}
+
+function imagePoint(clientX,clientY){
+ const b=canvas.getBoundingClientRect();
+ const sx=canvas.width/b.width,sy=canvas.height/b.height;
+ const xCanvas=(clientX-b.left)*sx,yCanvas=(clientY-b.top)*sy;
+ const scale=baseW/img.naturalWidth*zoom;
+ return {x:(xCanvas-panX)/scale,y:(yCanvas-panY)/scale};
+}
+
+function canvasPoint(clientX,clientY){
+ const b=canvas.getBoundingClientRect();
+ return {x:(clientX-b.left)*canvas.width/b.width,y:(clientY-b.top)*canvas.height/b.height};
+}
+
+function validImagePoint(p){return p.x>=0&&p.x<=img.naturalWidth&&p.y>=0&&p.y<=img.naturalHeight;}
+
 function startMode(m){
  if(!img.src){alert('Please capture or upload a photograph first.');return;}
- mode=m;pts=[];
- alert(m==='scale'?'Tap the two ends of the known scale distance.':'Tap the bulk liquid level, then the lowest point of the meniscus.');
+ mode=m;pts=[];redraw();
+ alert(m==='scale'?'Zoom in if needed, then tap the two ends of the known scale distance. You can drag the image to reposition it.':'Zoom in if needed, then tap the bulk liquid level first, then the lowest point of the meniscus. You can drag the image to reposition it.');
 }
 
 canvas.addEventListener('pointerdown',e=>{
- if(!mode)return;
- const b=canvas.getBoundingClientRect();
- const p={x:(e.clientX-b.left)*canvas.width/b.width,y:(e.clientY-b.top)*canvas.height/b.height};
- pts.push(p); redraw();
- if(pts.length===2){
-  const d=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
-  if(mode==='scale'){
-   scalePx=d;
-   const known=+document.getElementById('known').value;
-   document.getElementById('scaleOut').textContent='Scale: '+(known/scalePx).toFixed(5)+' mm/pixel';
-  }else{
-   if(!scalePx){alert('Please calibrate the image first.');pts=[];redraw();return;}
-   const hPx=Math.abs(pts[1].y-pts[0].y);
-   const h=hPx*(+document.getElementById('known').value)/scalePx;
-   document.getElementById('hOut').textContent='Capillary rise h: '+h.toFixed(2)+' mm';
-  }
-  mode='';
- }
+ if(!img.src)return;
+ dragging=true;moved=false;startX=lastX=e.clientX;startY=lastY=e.clientY;
+ canvas.setPointerCapture(e.pointerId);
 });
 
+canvas.addEventListener('pointermove',e=>{
+ if(!dragging)return;
+ const dx=e.clientX-lastX,dy=e.clientY-lastY;
+ if(Math.hypot(e.clientX-startX,e.clientY-startY)>6)moved=true;
+ if(moved && zoom>1){
+  const b=canvas.getBoundingClientRect();
+  panX += dx*canvas.width/b.width; panY += dy*canvas.height/b.height;
+  clampPan(); redraw();
+ }
+ lastX=e.clientX;lastY=e.clientY;
+});
+
+canvas.addEventListener('pointerup',e=>{
+ if(!dragging)return;
+ dragging=false;
+ if(moved || !mode)return;
+ const p=imagePoint(e.clientX,e.clientY);
+ if(!validImagePoint(p))return;
+ pts.push(p);redraw();
+ if(pts.length===2)finishMeasurement();
+});
+
+canvas.addEventListener('pointercancel',()=>{dragging=false;});
+
+function finishMeasurement(){
+ const scaleFactor=baseW/img.naturalWidth;
+ const d=Math.hypot((pts[1].x-pts[0].x)*scaleFactor,(pts[1].y-pts[0].y)*scaleFactor);
+ if(mode==='scale'){
+  scalePx=d;
+  const known=+document.getElementById('known').value;
+  if(known<=0){alert('Please enter a valid known scale length.');mode='';return;}
+  document.getElementById('scaleOut').textContent='Scale: '+(known/scalePx).toFixed(5)+' mm/pixel';
+ }else{
+  if(!scalePx){alert('Please calibrate the image first.');pts=[];redraw();return;}
+  const hPx=Math.abs(pts[1].y-pts[0].y)*scaleFactor;
+  const h=hPx*(+document.getElementById('known').value)/scalePx;
+  document.getElementById('hOut').textContent='Capillary rise h: '+h.toFixed(2)+' mm';
+ }
+ mode='';
+}
+
 function redraw(){
- ctx.drawImage(img,0,0,canvas.width,canvas.height);
+ if(!img.src)return;
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+ const scale=baseW/img.naturalWidth*zoom;
+ ctx.drawImage(img,panX,panY,img.naturalWidth*scale,img.naturalHeight*scale);
+ // Draw selected points in the current zoomed view.
  ctx.lineWidth=3;ctx.strokeStyle='#C0392B';ctx.fillStyle='#C0392B';
- pts.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,6,0,2*Math.PI);ctx.fill();});
- if(pts.length===2){ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);ctx.lineTo(pts[1].x,pts[1].y);ctx.stroke();}
+ const toCanvas=p=>({x:panX+p.x*scale,y:panY+p.y*scale});
+ pts.forEach(p=>{const q=toCanvas(p);ctx.beginPath();ctx.arc(q.x,q.y,6,0,2*Math.PI);ctx.fill();});
+ if(pts.length===2){const a=toCanvas(pts[0]),b=toCanvas(pts[1]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();}
 }
 </script>
 </body></html>
